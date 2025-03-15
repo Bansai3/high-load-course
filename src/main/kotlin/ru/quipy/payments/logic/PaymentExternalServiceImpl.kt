@@ -6,6 +6,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
+import org.springframework.http.HttpStatus
+import org.springframework.web.server.ResponseStatusException
 import ru.quipy.common.utils.NonBlockingOngoingWindow
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
@@ -37,8 +39,7 @@ class PaymentExternalSystemAdapterImpl(
     private val slidingWindowRateLimiter = SlidingWindowRateLimiter(600, Duration.ofSeconds(60))
     private val ongoingWindow = NonBlockingOngoingWindow(parallelRequests)
     private val semaphore = Semaphore(properties.parallelRequests)
-    private val retryStatusCodes = listOf(429, 500, 502, 503, 504)
-    private val retryLimitAmount = 8
+    private val retryLimitAmount = 2
 
 
     private val client = OkHttpClient.Builder().build()
@@ -48,8 +49,6 @@ class PaymentExternalSystemAdapterImpl(
 
         val transactionId = UUID.randomUUID()
         logger.info("[$accountName] Submit for $paymentId , txId: $transactionId")
-
-        semaphore.acquire()
 
 //        slidingWindowRateLimiter.tickBlocking()
 
@@ -64,49 +63,34 @@ class PaymentExternalSystemAdapterImpl(
             post(emptyBody)
         }.build()
 
+        var retryCount = 1
+        var needToRetry = false
 
-        var retryCount = 0
-        var delayTime = 1
-        val retryAfterHeader = "Retry-After"
+        while (retryCount <= retryLimitAmount) {
+            needToRetry = false
 
-        try {
-
-            if (now() + requestAverageProcessingTime.toMillis() >= deadline) {
-                paymentESService.update(paymentId) {
-                    it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
-                }
+            if (!semaphore.tryAcquire()) {
+                logger.error("[$accountName] [ERROR] Too many concurrent requests.")
                 return
             }
-//            Добавляем троттлинг для запросов, по которым не укладываемся в SLA === Очистка очереди
-            while (retryCount < retryLimitAmount) {
+            try {
+                // Добавляем троттлинг для запросов, по которым не укладываемся в SLA === Очистка очереди
+                if (now() + requestAverageProcessingTime.toMillis() >= deadline) {
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+                    }
+                    return
+                }
                 while (!slidingWindowRateLimiter.tick()) {
-//                    throw ResponseStatusException(
-//                    HttpStatus.TOO_MANY_REQUESTS, "Too many requests, please try again later.")
+                    logger.error("[$accountName] [ERROR] Sliding window rate limit.")
+                    return
                 }
                 while (ongoingWindow.putIntoWindow() is NonBlockingOngoingWindow.WindowResponse.Fail) {
-                    // Intentionally empty
+                    logger.error("[$accountName] [ERROR] Ongoing window limit.")
+                    return
                 }
 
                 val response = client.newCall(request).execute()
-                val responseCode = response.code
-                val responseHeaders = response.headers
-                val retryAfterHeaderTime = responseHeaders[retryAfterHeader]
-
-                if (retryAfterHeaderTime != null) {
-                    val retryAfterHeaderTimeValue = retryAfterHeaderTime.toLong()
-                    Thread.sleep(retryAfterHeaderTimeValue * 50)
-                    retryCount++
-                    ongoingWindow.releaseWindow()
-                    continue
-                }
-
-                if (responseCode in retryStatusCodes) {
-                    Thread.sleep((delayTime.toLong() * 50))
-                    retryCount++
-                    delayTime = if (delayTime == 0) 1 else delayTime * 2
-                    ongoingWindow.releaseWindow()
-                    continue
-                }
 
                 val body = try {
                     mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
@@ -122,9 +106,12 @@ class PaymentExternalSystemAdapterImpl(
                 paymentESService.update(paymentId) {
                     it.logProcessing(body.result, now(), transactionId, reason = body.message)
                 }
-                break
-            }
-        } catch (e: Exception) {
+
+                if (!body.result && retryCount < retryLimitAmount) {
+                    retryCount++
+                    needToRetry = true
+                }
+            } catch (e: Exception) {
                 when (e) {
                     is SocketTimeoutException -> {
                         logger.error(
@@ -147,14 +134,17 @@ class PaymentExternalSystemAdapterImpl(
                         }
                     }
                 }
+                if (retryCount < retryLimitAmount) {
+                    retryCount++
+                    needToRetry = true
+                }
             } finally {
                 semaphore.release()
-                if (retryCount < retryLimitAmount) {
-                    ongoingWindow.releaseWindow()
-                }
+                ongoingWindow.releaseWindow()
             }
+            if (!needToRetry) break
         }
-
+    }
 
     override fun price() = properties.price
 
