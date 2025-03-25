@@ -37,14 +37,14 @@ class PaymentExternalSystemAdapterImpl(
     private val requestAverageProcessingTime = properties.averageProcessingTime
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
-    private val slidingWindowRateLimiter = SlidingWindowRateLimiter(600, Duration.ofSeconds(60))
+    private val slidingWindowRateLimiter = SlidingWindowRateLimiter(5000, Duration.ofSeconds(60))
     private val ongoingWindow = NonBlockingOngoingWindow(parallelRequests)
-    private val semaphore = Semaphore(properties.parallelRequests)
+    private val semaphore = Semaphore(50)
     private val retryLimitAmount = 2
 
 
     private val client = OkHttpClient.Builder()
-        .readTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(19, TimeUnit.SECONDS)
         .build()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
