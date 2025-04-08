@@ -3,6 +3,8 @@ package ru.quipy.payments.logic
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import okhttp3.OkHttpClient
+import okhttp3.Dispatcher
+import okhttp3.ConnectionPool
 import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
@@ -37,14 +39,25 @@ class PaymentExternalSystemAdapterImpl(
     private val requestAverageProcessingTime = properties.averageProcessingTime
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
-    private val slidingWindowRateLimiter = SlidingWindowRateLimiter(5000, Duration.ofSeconds(60))
+    private val slidingWindowRateLimiter = SlidingWindowRateLimiter(1000, Duration.ofSeconds(60))
     private val ongoingWindow = NonBlockingOngoingWindow(parallelRequests)
     private val semaphore = Semaphore(parallelRequests)
     private val retryLimitAmount = 2
+    private val dispatcher = Dispatcher().apply {
+        maxRequests = 1000
+        maxRequestsPerHost = 1000
+    }
+    private val connectionPool = ConnectionPool(
+        maxIdleConnections = 20,
+        keepAliveDuration = 5,
+        timeUnit = TimeUnit.MINUTES
+    )
 
 
     private val client = OkHttpClient.Builder()
-        .readTimeout(3, TimeUnit.SECONDS)
+        .connectionPool(connectionPool)
+        .dispatcher(dispatcher)
+        .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
