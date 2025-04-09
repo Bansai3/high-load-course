@@ -12,6 +12,9 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import org.eclipse.jetty.http2.server.HTTP2CServerConnectionFactory
+import org.springframework.boot.web.embedded.jetty.JettyServerCustomizer
+import org.springframework.boot.web.embedded.jetty.JettyServletWebServerFactory
 import java.util.*
 
 
@@ -23,7 +26,19 @@ class PaymentAccountsConfig {
         private val mapper = ObjectMapper().registerKotlinModule().registerModules(JavaTimeModule())
     }
 
-    private val allowedAccounts = setOf("acc-5")
+    private val allowedAccounts = setOf("acc-12")
+
+    @Bean
+    fun jettyServerCustomizer(): JettyServletWebServerFactory {
+        val jettyServletWebServerFactory = JettyServletWebServerFactory()
+
+        val c = JettyServerCustomizer {
+            (it.connectors[0].getConnectionFactory("h2c") as HTTP2CServerConnectionFactory).maxConcurrentStreams = 1_000_000
+        }
+
+        jettyServletWebServerFactory.serverCustomizers.add(c)
+        return jettyServletWebServerFactory
+    }
 
     @Bean
     fun accountAdapters(paymentService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>): List<PaymentExternalSystemAdapter> {
